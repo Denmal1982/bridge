@@ -1,0 +1,754 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Консоль моста CashBridge</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.4/ethers.umd.min.js"></script>
+
+<style>
+/* Layout: одна колонка панелей на тёмном слоистом фоне; шапка липкая,
+   данные моноширинные, привилегированные действия помечены латунью. */
+:root{
+  --bg:#0e1219; --surface:#151b25; --surface-2:#1b2230; --line:#262f3e;
+  --fg:#e7ecf3; --muted:#8b95a8; --faint:#5d6779;
+  --brass:#c8973e; --brass-dim:#8a6828;
+  --ok:#3fa87a; --bad:#d1565b; --info:#5b8fd6;
+  --font-ui:'IBM Plex Sans',system-ui,-apple-system,Segoe UI,sans-serif;
+  --font-mono:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{
+  margin:0;background:var(--bg);color:var(--fg);
+  font-family:var(--font-ui);font-size:14px;line-height:1.55;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1120px;margin:0 auto;padding-inline:16px;padding-block:0 64px}
+
+/* ── шапка ── */
+header.top{
+  position:sticky;top:env(safe-area-inset-top,0px);z-index:20;
+  background:rgba(14,18,25,.92);backdrop-filter:blur(8px);
+  border-bottom:1px solid var(--line);
+}
+.top-in{max-width:1120px;margin:0 auto;padding:12px 16px;
+  display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.brand{display:flex;align-items:baseline;gap:9px;margin-right:auto;min-width:0}
+.brand b{font-size:15px;font-weight:600;letter-spacing:-.01em}
+.brand span{font-family:var(--font-mono);font-size:11px;color:var(--faint)}
+.chain{font-family:var(--font-mono);font-size:11px;color:var(--muted);
+  border:1px solid var(--line);border-radius:4px;padding:3px 8px;white-space:nowrap}
+.chain.warn{color:var(--brass);border-color:var(--brass-dim)}
+
+/* ── кнопки ── */
+button{font:inherit;cursor:pointer;border-radius:5px;transition:background .12s,border-color .12s}
+button:focus-visible{outline:2px solid var(--info);outline-offset:2px}
+.btn{background:var(--surface-2);color:var(--fg);border:1px solid var(--line);padding:7px 13px}
+.btn:hover:not(:disabled){background:#222b3a;border-color:#33405333}
+.btn-primary{background:var(--brass);color:#1b1405;border:1px solid var(--brass);font-weight:600;padding:7px 15px}
+.btn-primary:hover:not(:disabled){background:#d8a54a}
+.btn-danger{background:transparent;color:var(--bad);border:1px solid #4a2a2d;padding:5px 11px;font-size:13px}
+.btn-danger:hover:not(:disabled){background:#2a1a1c}
+.btn-sm{padding:4px 10px;font-size:12px}
+button:disabled{opacity:.4;cursor:not-allowed}
+
+/* ── панели ── */
+section.panel{
+  background:var(--surface);border:1px solid var(--line);border-radius:8px;
+  margin-top:18px;overflow:hidden}
+.panel-head{
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  padding:13px 16px;border-bottom:1px solid var(--line);background:var(--surface-2)}
+.panel-head h2{margin:0;font-size:13px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.panel-body{padding:16px}
+.panel-body + .panel-body{border-top:1px solid var(--line)}
+
+/* ── пары ключ/значение ── */
+.kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:14px}
+.kv > div{min-width:0}
+.kv dt{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);margin-bottom:3px}
+.kv dd{margin:0;font-family:var(--font-mono);font-size:13px;word-break:break-all;font-variant-numeric:tabular-nums}
+
+/* ── пилюли состояния ── */
+.pill{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;
+  letter-spacing:.04em;text-transform:uppercase;border-radius:20px;padding:3px 10px;white-space:nowrap}
+.pill::before{content:'';width:6px;height:6px;border-radius:50%;background:currentColor}
+.pill-ok{color:var(--ok);background:#12281f}
+.pill-bad{color:var(--bad);background:#2a1618}
+.pill-off{color:var(--faint);background:#1c222e}
+.pill-brass{color:var(--brass);background:#2a2110}
+
+/* ── таблицы ── */
+.tw{overflow-x:auto;margin:0 -16px;padding:0 16px}
+table{border-collapse:collapse;width:100%;min-width:560px;font-size:13px}
+th{text-align:left;font-size:10px;letter-spacing:.07em;text-transform:uppercase;
+  color:var(--faint);font-weight:600;padding:0 12px 7px 0;border-bottom:1px solid var(--line)}
+td{padding:9px 12px 9px 0;border-bottom:1px solid #1e2531;vertical-align:middle}
+tr:last-child td{border-bottom:none}
+td.mono,th.mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
+td.num{text-align:right;padding-right:18px;font-family:var(--font-mono);font-variant-numeric:tabular-nums}
+th.num{text-align:right;padding-right:18px}
+
+/* ── формы ── */
+label{display:block;font-size:11px;letter-spacing:.05em;text-transform:uppercase;
+  color:var(--faint);margin-bottom:5px}
+input,textarea,select{
+  width:100%;font-family:var(--font-mono);font-size:13px;color:var(--fg);
+  background:var(--bg);border:1px solid var(--line);border-radius:5px;padding:8px 10px}
+input:focus,textarea:focus,select:focus{outline:none;border-color:var(--info)}
+textarea{resize:vertical;min-height:70px;line-height:1.5}
+.field{margin-bottom:12px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
+.row > .field{flex:1 1 210px;margin-bottom:0;min-width:0}
+.hint{font-size:12px;color:var(--faint);margin-top:5px;line-height:1.45}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:18px}
+
+/* ── токен-карточка ── */
+.tok-head{display:flex;align-items:center;gap:11px;flex-wrap:wrap;margin-bottom:14px}
+.ticker{font-size:17px;font-weight:700;letter-spacing:-.01em}
+.tok-addr{font-family:var(--font-mono);font-size:12px;color:var(--muted);word-break:break-all}
+.sub{font-size:13px;color:var(--muted)}
+
+/* ── прочее ── */
+.copy{background:none;border:none;color:var(--faint);padding:0 0 0 5px;font-size:12px}
+.copy:hover{color:var(--brass)}
+.msg{border-radius:6px;padding:11px 13px;font-size:13px;margin-top:12px;border:1px solid}
+.msg-err{color:#f0a3a6;background:#241416;border-color:#4a2a2d}
+.msg-ok{color:#8fd9b4;background:#122620;border-color:#1f4534}
+.msg-info{color:var(--muted);background:var(--surface-2);border-color:var(--line)}
+.empty{color:var(--faint);font-size:13px;padding:22px 0;text-align:center}
+.divider{height:1px;background:var(--line);margin:18px 0}
+h3{margin:0 0 11px;font-size:13px;font-weight:600;color:var(--fg)}
+h3.brass{color:var(--brass)}
+a{color:var(--info)}
+code{font-family:var(--font-mono);font-size:12px;background:var(--surface-2);
+  padding:1px 5px;border-radius:3px;color:var(--muted)}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="top-in">
+    <div class="brand">
+      <b>Консоль моста</b>
+      <span>CashBridge v7</span>
+    </div>
+    <span class="chain" id="chainBadge">сеть не определена</span>
+    <span class="pill pill-off" id="roleBadge">только чтение</span>
+    <button class="btn" id="refreshBtn" title="Перечитать состояние">Обновить</button>
+    <button class="btn-primary" id="connectBtn">Подключить кошелёк</button>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Контракт</h2>
+      <span class="pill pill-off" id="gwPill" hidden>шлюз не привязан</span>
+    </div>
+    <div class="panel-body">
+      <div class="kv">
+        <div>
+          <dt>Адрес моста</dt>
+          <dd id="cAddr">—<button class="copy" data-copy="cAddr" title="Скопировать">копировать</button></dd>
+        </div>
+        <div>
+          <dt>Админ</dt>
+          <dd id="cAdmin">—</dd>
+        </div>
+        <div>
+          <dt>Card-шлюз</dt>
+          <dd id="cGateway">—</dd>
+        </div>
+        <div>
+          <dt>Ваш аккаунт</dt>
+          <dd id="cAccount">не подключён</dd>
+        </div>
+      </div>
+      <div id="connMsg"></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Токены и узлы</h2>
+      <span class="sub" id="tokCount"></span>
+    </div>
+    <div class="panel-body">
+      <div class="row">
+        <div class="field">
+          <label for="manualToken">Добавить токен в список вручную</label>
+          <input id="manualToken" placeholder="0x… адрес токена" autocomplete="off">
+        </div>
+        <button class="btn" id="addManualBtn">Показать</button>
+      </div>
+      <p class="hint">Список собирается из событий <code>TokenAdded</code>. Если узел RPC
+        ограничивает глубину поиска по логам, добавьте адрес вручную — он сохранится в браузере.</p>
+      <div id="tokMsg"></div>
+    </div>
+    <div id="tokens"></div>
+  </section>
+
+  <section class="panel" id="adminPanel">
+    <div class="panel-head">
+      <h2>Управление</h2>
+      <span class="pill pill-brass">только админ</span>
+    </div>
+
+    <div class="panel-body">
+      <h3 class="brass">Добавить токен</h3>
+      <div class="row">
+        <div class="field">
+          <label for="atToken">Адрес токена</label>
+          <input id="atToken" placeholder="0x…" autocomplete="off">
+        </div>
+        <div class="field" style="flex:0 1 130px">
+          <label for="atDec">Decimals</label>
+          <input id="atDec" placeholder="18" inputmode="numeric">
+        </div>
+      </div>
+      <div class="field" style="margin-top:12px">
+        <label for="atTiers">Тиры — по одному в строке: сумма, n, k</label>
+        <textarea id="atTiers" spellcheck="false">10000000, 3, 2
+max, 5, 4</textarea>
+        <p class="hint">Суммы строго возрастают, последняя — <code>max</code>.
+          <b>n</b> — сколько подписантов выбирается, <b>k</b> — сколько подписей требуется.</p>
+      </div>
+      <div class="field">
+        <label for="atPubs">Публичные ключи узлов — по одному в строке, 64 байта (128 hex)</label>
+        <textarea id="atPubs" spellcheck="false" placeholder="0x… 128 hex-символов"></textarea>
+      </div>
+      <button class="btn-primary" id="addTokenBtn" disabled>Добавить токен</button>
+      <div id="atMsg"></div>
+    </div>
+
+    <div class="panel-body">
+      <div class="grid2">
+        <div>
+          <h3 class="brass">Передать права админа</h3>
+          <div class="field">
+            <label for="newAdmin">Новый адрес админа</label>
+            <input id="newAdmin" placeholder="0x…" autocomplete="off">
+          </div>
+          <button class="btn-primary" id="setAdminBtn" disabled>Передать права</button>
+          <p class="hint">Действие необратимо: управление сразу перейдёт новому адресу.</p>
+          <div id="saMsg"></div>
+        </div>
+        <div>
+          <h3 class="brass">Привязать card-шлюз</h3>
+          <div class="field">
+            <label for="newGw">Адрес CardGateway</label>
+            <input id="newGw" placeholder="0x…" autocomplete="off">
+          </div>
+          <button class="btn-primary" id="setGwBtn" disabled>Привязать</button>
+          <p class="hint">Одноразовая привязка. Сменить шлюз потом нельзя — только передеплой моста.</p>
+          <div id="gwMsg"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Проверка nodeId</h2></div>
+    <div class="panel-body">
+      <div class="row">
+        <div class="field">
+          <label for="nidPub">Публичный ключ узла (64 байта)</label>
+          <input id="nidPub" placeholder="0x… 128 hex-символов" autocomplete="off">
+        </div>
+        <button class="btn" id="nidBtn">Посчитать</button>
+      </div>
+      <p class="hint">Сверяет расчёт контракта с локальным: nodeId — последние 10 байт
+        <code>sha256(pubX‖pubY)</code>, eth-адрес — последние 20 байт <code>keccak256</code>
+        того же ключа. Значения должны совпасть с тем, что показывает узел.</p>
+      <div id="nidMsg"></div>
+    </div>
+  </section>
+
+  <p class="hint" style="margin-top:20px;text-align:center">
+    Панель только читает и вызывает контракт напрямую через ваш кошелёк.
+    Ключи и подписи никуда не передаются.
+  </p>
+</div>
+
+<script>
+// ─────────────── настройки ───────────────
+const CONFIG = {
+  bridge: '0x3711Ca74bd543EaeEC8f650088705a584751a669',
+  // Читать без кошелька. Работает на своём хостинге; внутри артефакта запрос
+  // к внешнему узлу блокируется, поэтому там нужен кошелёк.
+  fallbackRpc: 'https://ethereum-sepolia-rpc.publicnode.com',
+  expectedChainId: 11155111n,
+  expectedChainName: 'Sepolia'
+};
+
+const BRIDGE_ABI = [
+  'function admin() view returns (address)',
+  'function cardGateway() view returns (address)',
+  'function getTokenConfig(address) view returns (tuple(bool allowed,uint8 tokenDecimals,uint32 rosterVersion,uint256 instantCap))',
+  'function getAllValidators(address) view returns (bytes10[])',
+  'function getValidatorRecord(address,bytes10) view returns (bool exists,uint32 activeFromVersion,uint32 bannedAtVersion,address addr,bytes32 pubX,bytes32 pubY)',
+  'function getTokenTiers(address) view returns (tuple(uint256 sum,uint8 n,uint8 k)[])',
+  'function lockedBalance(address) view returns (uint256)',
+  'function nodeIdFromPubkey(bytes) pure returns (bytes10)',
+  'function addToken(address,uint8,tuple(uint256 sum,uint8 n,uint8 k)[],bytes[])',
+  'function addTokenValidator(address,bytes)',
+  'function banTokenValidator(address,bytes10)',
+  'function setTokenAllowed(address,bool)',
+  'function setInstantCap(address,uint256)',
+  'function setAdmin(address)',
+  'function setCardGateway(address)',
+  'event TokenAdded(address indexed token,uint8 tokenDecimals,uint256 tierCount,uint256 validatorCount)'
+];
+const ERC20_ABI = [
+  'function symbol() view returns (string)',
+  'function name() view returns (string)',
+  'function decimals() view returns (uint8)'
+];
+const ZERO = '0x0000000000000000000000000000000000000000';
+const MAXU = (1n << 256n) - 1n;
+
+// ─────────────── состояние ───────────────
+const S = {
+  provider:null, signer:null, account:null, chainId:null,
+  bridge:null, admin:null, gateway:null, isAdmin:false,
+  tokens:[], manual:[]
+};
+
+const $ = id => document.getElementById(id);
+const short = a => a ? a.slice(0,6)+'…'+a.slice(-4) : '—';
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function say(el, text, kind){
+  const n = typeof el === 'string' ? $(el) : el;
+  if(!n) return;
+  if(!text){ n.innerHTML=''; return; }
+  n.innerHTML = '<div class="msg msg-'+kind+'">'+esc(text)+'</div>';
+}
+
+function storeGet(){
+  try{ return JSON.parse(localStorage.getItem('cb_manual_tokens')||'[]'); }catch(e){ return []; }
+}
+function storePut(list){
+  try{ localStorage.setItem('cb_manual_tokens', JSON.stringify(list)); }catch(e){}
+}
+
+// ─────────────── подключение ───────────────
+async function readProvider(){
+  if(window.ethereum) return new ethers.BrowserProvider(window.ethereum);
+  if(CONFIG.fallbackRpc) return new ethers.JsonRpcProvider(CONFIG.fallbackRpc);
+  return null;
+}
+
+async function connect(){
+  if(!window.ethereum){
+    say('connMsg','Кошелёк не найден. Установите MetaMask или откройте страницу на своём хостинге — '+
+      'внутри предпросмотра расширение может быть недоступно.','err');
+    return;
+  }
+  try{
+    const p = new ethers.BrowserProvider(window.ethereum);
+    await p.send('eth_requestAccounts', []);
+    S.provider = p;
+    S.signer = await p.getSigner();
+    S.account = await S.signer.getAddress();
+    say('connMsg','');
+    await loadAll();
+  }catch(e){
+    say('connMsg', 'Подключиться не удалось: '+(e.shortMessage||e.message), 'err');
+  }
+}
+
+// ─────────────── чтение состояния ───────────────
+async function loadAll(){
+  try{
+    if(!S.provider){
+      S.provider = await readProvider();
+      if(!S.provider){
+        say('connMsg','Нет ни кошелька, ни резервного RPC — читать нечем.','err');
+        return;
+      }
+    }
+    const net = await S.provider.getNetwork();
+    S.chainId = net.chainId;
+    paintChain();
+
+    S.bridge = new ethers.Contract(CONFIG.bridge, BRIDGE_ABI, S.signer || S.provider);
+
+    const [admin, gw] = await Promise.all([
+      S.bridge.admin().catch(()=>null),
+      S.bridge.cardGateway().catch(()=>ZERO)
+    ]);
+    if(admin === null){
+      say('connMsg','По адресу '+CONFIG.bridge+' контракт не отвечает. Проверьте сеть в кошельке.','err');
+      return;
+    }
+    S.admin = admin; S.gateway = gw;
+    S.isAdmin = !!S.account && S.account.toLowerCase() === admin.toLowerCase();
+
+    paintContract();
+    await loadTokens();
+  }catch(e){
+    say('connMsg','Ошибка чтения: '+(e.shortMessage||e.message),'err');
+  }
+}
+
+function paintChain(){
+  const b = $('chainBadge');
+  const known = S.chainId === CONFIG.expectedChainId;
+  b.textContent = known ? CONFIG.expectedChainName : ('chainId '+S.chainId);
+  b.classList.toggle('warn', !known);
+}
+
+function paintContract(){
+  $('cAddr').innerHTML = esc(CONFIG.bridge)+'<button class="copy" data-copy="cAddr">копировать</button>';
+  $('cAdmin').textContent = S.admin;
+  $('cGateway').textContent = S.gateway === ZERO ? 'не привязан' : S.gateway;
+  $('cAccount').textContent = S.account || 'не подключён';
+  $('gwPill').hidden = S.gateway !== ZERO;
+
+  const r = $('roleBadge');
+  if(S.isAdmin){ r.className='pill pill-brass'; r.textContent='админ'; }
+  else if(S.account){ r.className='pill pill-off'; r.textContent='не админ'; }
+  else { r.className='pill pill-off'; r.textContent='только чтение'; }
+
+  ['addTokenBtn','setAdminBtn','setGwBtn'].forEach(id => $(id).disabled = !S.isAdmin);
+  $('connectBtn').textContent = S.account ? short(S.account) : 'Подключить кошелёк';
+}
+
+async function discoverTokens(){
+  const found = new Set(storeGet().map(a=>a.toLowerCase()));
+  try{
+    const ev = S.bridge.filters.TokenAdded();
+    let logs = [];
+    try{
+      logs = await S.bridge.queryFilter(ev, 0, 'latest');
+    }catch(e){
+      const head = await S.provider.getBlockNumber();
+      logs = await S.bridge.queryFilter(ev, Math.max(0, head-45000), 'latest');
+      say('tokMsg','Полная история логов недоступна на этом RPC — просмотрены последние 45 000 блоков. '+
+        'Недостающие токены добавьте вручную.','info');
+    }
+    logs.forEach(l => found.add(l.args.token.toLowerCase()));
+  }catch(e){
+    say('tokMsg','Событий TokenAdded прочитать не удалось: '+(e.shortMessage||e.message)+
+      ' Добавьте адреса токенов вручную.','info');
+  }
+  return [...found];
+}
+
+async function loadTokens(){
+  const box = $('tokens');
+  box.innerHTML = '<div class="panel-body"><div class="empty">Читаем ростер…</div></div>';
+
+  const addrs = await discoverTokens();
+  $('tokCount').textContent = addrs.length ? (addrs.length+' в списке') : '';
+
+  if(!addrs.length){
+    box.innerHTML = '<div class="panel-body"><div class="empty">'+
+      'Ни одного токена не найдено. Добавьте его через «Управление» или введите адрес вручную.'+
+      '</div></div>';
+    return;
+  }
+
+  const cards = await Promise.all(addrs.map(a => loadToken(a).catch(e => ({
+    address:a, error:(e.shortMessage||e.message)
+  }))));
+  box.innerHTML = cards.map(renderToken).join('');
+}
+
+async function loadToken(address){
+  const erc = new ethers.Contract(address, ERC20_ABI, S.provider);
+  const [cfg, nodes, tiers, locked, sym, nm, dec] = await Promise.all([
+    S.bridge.getTokenConfig(address),
+    S.bridge.getAllValidators(address),
+    S.bridge.getTokenTiers(address).catch(()=>[]),
+    S.bridge.lockedBalance(address).catch(()=>0n),
+    erc.symbol().catch(()=>null),
+    erc.name().catch(()=>null),
+    erc.decimals().catch(()=>null)
+  ]);
+
+  const recs = await Promise.all(nodes.map(async nid => {
+    const r = await S.bridge.getValidatorRecord(address, nid);
+    const ver = Number(cfg.rosterVersion);
+    const from = Number(r.activeFromVersion), ban = Number(r.bannedAtVersion);
+    const active = r.exists && ver >= from && (ban === 0 || ver < ban);
+    return { nid, addr:r.addr, from, ban, active };
+  }));
+
+  return { address, cfg, tiers, locked, recs,
+           symbol:sym, name:nm, decimals: dec===null ? Number(cfg.tokenDecimals) : Number(dec) };
+}
+
+function fmtAmount(v, dec){
+  try{ return ethers.formatUnits(v, dec ?? 0); }catch(e){ return v.toString(); }
+}
+
+function renderToken(t){
+  if(t.error){
+    return '<div class="panel-body"><div class="tok-addr">'+esc(t.address)+'</div>'+
+      '<div class="msg msg-err">'+esc(t.error)+'</div></div>';
+  }
+  const dec = t.decimals;
+  const activeN = t.recs.filter(r=>r.active).length;
+
+  const tiersRows = t.tiers.length ? t.tiers.map(x =>
+    '<tr><td class="mono">'+(x.sum === MAXU ? '∞' : esc(fmtAmount(x.sum, dec)))+'</td>'+
+    '<td class="num">'+x.n+'</td><td class="num">'+x.k+'</td></tr>').join('')
+    : '<tr><td colspan="3" class="sub">тиры не заданы</td></tr>';
+
+  const nodeRows = t.recs.length ? t.recs.map(r =>
+    '<tr>'+
+      '<td class="mono">'+esc(r.nid)+'</td>'+
+      '<td class="mono" style="color:var(--muted)">'+esc(r.addr)+'</td>'+
+      '<td>'+(r.active
+        ? '<span class="pill pill-ok">активен</span>'
+        : (r.ban ? '<span class="pill pill-bad">забанен</span>'
+                 : '<span class="pill pill-off">не активен</span>'))+'</td>'+
+      '<td class="num">'+r.from+'</td>'+
+      '<td class="num">'+(r.ban || '—')+'</td>'+
+      '<td>'+(S.isAdmin && r.active
+        ? '<button class="btn-danger btn-sm" data-ban="'+esc(t.address)+'|'+esc(r.nid)+'">Забанить</button>'
+        : '')+'</td>'+
+    '</tr>').join('')
+    : '<tr><td colspan="6" class="sub">узлов нет</td></tr>';
+
+  const adminBlock = S.isAdmin ? (
+    '<div class="divider"></div>'+
+    '<h3 class="brass">Действия с токеном</h3>'+
+    '<div class="row">'+
+      '<div class="field"><label>Публичный ключ нового узла (64 байта)</label>'+
+        '<input data-pub="'+esc(t.address)+'" placeholder="0x… 128 hex-символов" autocomplete="off"></div>'+
+      '<button class="btn-primary" data-addval="'+esc(t.address)+'">Добавить узел</button>'+
+    '</div>'+
+    '<div class="row" style="margin-top:12px">'+
+      '<div class="field" style="flex:0 1 240px"><label>Мгновенный лимит по карте</label>'+
+        '<input data-cap="'+esc(t.address)+'" placeholder="'+esc(fmtAmount(t.cfg.instantCap, dec))+'" autocomplete="off"></div>'+
+      '<button class="btn" data-setcap="'+esc(t.address)+'">Задать лимит</button>'+
+      '<button class="btn" data-allow="'+esc(t.address)+'|'+(t.cfg.allowed?'0':'1')+'">'+
+        (t.cfg.allowed ? 'Приостановить токен' : 'Возобновить токен')+'</button>'+
+    '</div>'+
+    '<div data-msg="'+esc(t.address)+'"></div>'
+  ) : '';
+
+  return '<div class="panel-body">'+
+    '<div class="tok-head">'+
+      '<span class="ticker">'+esc(t.symbol || 'без тикера')+'</span>'+
+      (t.name ? '<span class="sub">'+esc(t.name)+'</span>' : '')+
+      (t.cfg.allowed ? '<span class="pill pill-ok">разрешён</span>'
+                     : '<span class="pill pill-bad">приостановлен</span>')+
+    '</div>'+
+    '<div class="tok-addr" style="margin-bottom:14px">'+esc(t.address)+'</div>'+
+    '<div class="kv" style="margin-bottom:18px">'+
+      '<div><dt>Узлов активно</dt><dd>'+activeN+' из '+t.recs.length+'</dd></div>'+
+      '<div><dt>Версия ростера</dt><dd>'+t.cfg.rosterVersion+'</dd></div>'+
+      '<div><dt>Заблокировано</dt><dd>'+esc(fmtAmount(t.locked, dec))+' '+esc(t.symbol||'')+'</dd></div>'+
+      '<div><dt>Decimals</dt><dd>'+dec+'</dd></div>'+
+    '</div>'+
+    '<h3>Узлы</h3>'+
+    '<div class="tw"><table><thead><tr>'+
+      '<th class="mono">nodeId (10 байт)</th><th>eth-адрес</th><th>состояние</th>'+
+      '<th class="num">активен с</th><th class="num">бан в</th><th></th>'+
+    '</tr></thead><tbody>'+nodeRows+'</tbody></table></div>'+
+    '<h3 style="margin-top:18px">Тиры подписей</h3>'+
+    '<div class="tw"><table style="min-width:340px"><thead><tr>'+
+      '<th>до суммы</th><th class="num">выборка n</th><th class="num">кворум k</th>'+
+    '</tr></thead><tbody>'+tiersRows+'</tbody></table></div>'+
+    adminBlock+
+  '</div>';
+}
+
+// ─────────────── разбор ввода ───────────────
+function parsePub(v){
+  const s = (v||'').trim().toLowerCase().replace(/^0x/,'');
+  if(!/^[0-9a-f]{128}$/.test(s)) throw new Error('Ключ должен быть 128 hex-символов (64 байта), без префикса 0x04.');
+  return '0x'+s;
+}
+function parseAddr(v, what){
+  const s = (v||'').trim();
+  if(!ethers.isAddress(s)) throw new Error('Неверный адрес: '+what);
+  return ethers.getAddress(s);
+}
+function parseTiers(text, dec){
+  const rows = (text||'').split('\n').map(l=>l.trim()).filter(Boolean);
+  if(!rows.length) throw new Error('Нужен хотя бы один тир.');
+  return rows.map((line,i) => {
+    const p = line.split(',').map(x=>x.trim());
+    if(p.length !== 3) throw new Error('Строка '+(i+1)+': нужно три значения через запятую.');
+    const sum = /^(max|∞)$/i.test(p[0]) ? MAXU : ethers.parseUnits(p[0], dec);
+    const n = Number(p[1]), k = Number(p[2]);
+    if(!Number.isInteger(n) || !Number.isInteger(k) || k === 0 || k > n)
+      throw new Error('Строка '+(i+1)+': требуется 0 < k ≤ n.');
+    return { sum, n, k };
+  });
+}
+
+// ─────────────── транзакции ───────────────
+async function send(msgEl, label, fn){
+  if(!S.signer){ say(msgEl,'Сначала подключите кошелёк.','err'); return; }
+  try{
+    say(msgEl, label+': подтвердите в кошельке…', 'info');
+    const tx = await fn();
+    say(msgEl, label+': отправлено, ждём подтверждения…', 'info');
+    await tx.wait();
+    say(msgEl, label+': готово.', 'ok');
+    await loadAll();
+  }catch(e){
+    say(msgEl, (e.shortMessage || e.reason || e.message || 'Ошибка'), 'err');
+  }
+}
+
+// ─────────────── обработчики ───────────────
+$('connectBtn').addEventListener('click', connect);
+$('refreshBtn').addEventListener('click', () => loadAll());
+
+$('addManualBtn').addEventListener('click', () => {
+  try{
+    const a = parseAddr($('manualToken').value, 'токен');
+    const list = storeGet();
+    if(!list.some(x => x.toLowerCase() === a.toLowerCase())){ list.push(a); storePut(list); }
+    $('manualToken').value = '';
+    say('tokMsg','');
+    loadTokens();
+  }catch(e){ say('tokMsg', e.message, 'err'); }
+});
+
+$('addTokenBtn').addEventListener('click', () => {
+  let token, dec, tiers, pubs;
+  try{
+    token = parseAddr($('atToken').value, 'токен');
+    dec = Number($('atDec').value);
+    if(!Number.isInteger(dec) || dec < 1 || dec > 18) throw new Error('Decimals: целое от 1 до 18.');
+    tiers = parseTiers($('atTiers').value, dec);
+    if(tiers[tiers.length-1].sum !== MAXU) throw new Error('Последний тир должен иметь сумму max.');
+    pubs = ($('atPubs').value||'').split('\n').map(l=>l.trim()).filter(Boolean).map(parsePub);
+    if(!pubs.length) throw new Error('Нужен хотя бы один публичный ключ узла.');
+  }catch(e){ return say('atMsg', e.message, 'err'); }
+  send('atMsg','Добавление токена', () => S.bridge.addToken(token, dec, tiers, pubs));
+});
+
+$('setAdminBtn').addEventListener('click', () => {
+  let a;
+  try{ a = parseAddr($('newAdmin').value, 'новый админ'); }
+  catch(e){ return say('saMsg', e.message, 'err'); }
+  send('saMsg','Передача прав', () => S.bridge.setAdmin(a));
+});
+
+$('setGwBtn').addEventListener('click', () => {
+  let a;
+  try{ a = parseAddr($('newGw').value, 'CardGateway'); }
+  catch(e){ return say('gwMsg', e.message, 'err'); }
+  send('gwMsg','Привязка шлюза', () => S.bridge.setCardGateway(a));
+});
+
+$('nidBtn').addEventListener('click', async () => {
+  let pub;
+  try{ pub = parsePub($('nidPub').value); }
+  catch(e){ return say('nidMsg', e.message, 'err'); }
+  const local = '0x' + ethers.sha256(pub).slice(2).slice(-20);
+  const eth = ethers.getAddress('0x' + ethers.keccak256(pub).slice(2).slice(-40));
+  let onchain = null;
+  try{ if(S.bridge) onchain = await S.bridge.nodeIdFromPubkey(pub); }catch(e){}
+  const agree = onchain && onchain.toLowerCase() === local.toLowerCase();
+  $('nidMsg').innerHTML =
+    '<div class="msg msg-'+(onchain ? (agree?'ok':'err') : 'info')+'">'+
+      '<div style="font-family:var(--font-mono);line-height:1.8">'+
+        'nodeId&nbsp; '+esc(local)+'<br>'+
+        'eth-адрес&nbsp; '+esc(eth)+
+        (onchain ? '<br>контракт&nbsp; '+esc(onchain) : '')+
+      '</div>'+
+      (onchain ? (agree ? 'Контракт и локальный расчёт совпадают.'
+                        : 'Расхождение: контракт считает nodeId иначе.')
+               : 'Контракт недоступен — показан только локальный расчёт.')+
+    '</div>';
+});
+
+document.addEventListener('click', e => {
+  const c = e.target.closest('[data-copy]');
+  if(c){
+    const txt = $(c.dataset.copy).textContent.replace('копировать','').trim();
+    navigator.clipboard?.writeText(txt).catch(()=>{});
+    c.textContent = 'скопировано';
+    setTimeout(()=>{ c.textContent='копировать'; }, 1400);
+    return;
+  }
+  const ban = e.target.closest('[data-ban]');
+  if(ban){
+    const [tok, nid] = ban.dataset.ban.split('|');
+    send(document.querySelector('[data-msg="'+tok+'"]'), 'Бан узла',
+      () => S.bridge.banTokenValidator(tok, nid));
+    return;
+  }
+  const av = e.target.closest('[data-addval]');
+  if(av){
+    const tok = av.dataset.addval;
+    const box = document.querySelector('[data-msg="'+tok+'"]');
+    let pub;
+    try{ pub = parsePub(document.querySelector('[data-pub="'+tok+'"]').value); }
+    catch(err){ return say(box, err.message, 'err'); }
+    send(box, 'Добавление узла', () => S.bridge.addTokenValidator(tok, pub));
+    return;
+  }
+  const cap = e.target.closest('[data-setcap]');
+  if(cap){
+    const tok = cap.dataset.setcap;
+    const box = document.querySelector('[data-msg="'+tok+'"]');
+    const t = S.tokensById?.[tok];
+    let val;
+    try{
+      const raw = document.querySelector('[data-cap="'+tok+'"]').value.trim();
+      if(!raw) throw new Error('Укажите лимит.');
+      val = ethers.parseUnits(raw, t ? t.decimals : 0);
+    }catch(err){ return say(box, err.message, 'err'); }
+    send(box, 'Установка лимита', () => S.bridge.setInstantCap(tok, val));
+    return;
+  }
+  const al = e.target.closest('[data-allow]');
+  if(al){
+    const [tok, on] = al.dataset.allow.split('|');
+    send(document.querySelector('[data-msg="'+tok+'"]'),
+      on === '1' ? 'Возобновление токена' : 'Приостановка токена',
+      () => S.bridge.setTokenAllowed(tok, on === '1'));
+  }
+});
+
+if(window.ethereum){
+  window.ethereum.on?.('accountsChanged', () => location.reload());
+  window.ethereum.on?.('chainChanged', () => location.reload());
+}
+
+// ─────────────── старт ───────────────
+(function boot(){
+  if(typeof ethers === 'undefined'){
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js';
+    s.onload = start;
+    s.onerror = () => say('connMsg','Не удалось загрузить библиотеку ethers.','err');
+    document.head.appendChild(s);
+  } else start();
+})();
+
+async function start(){
+  $('cAddr').innerHTML = esc(CONFIG.bridge)+'<button class="copy" data-copy="cAddr">копировать</button>';
+  try{
+    if(window.ethereum){
+      const p = new ethers.BrowserProvider(window.ethereum);
+      const accts = await p.send('eth_accounts', []);
+      if(accts.length){
+        S.provider = p; S.signer = await p.getSigner(); S.account = accts[0];
+      }
+    }
+  }catch(e){}
+  loadAll();
+}
+</script>
+
+</body>
+</html>
