@@ -56,6 +56,16 @@ button:focus-visible{outline:2px solid var(--info);outline-offset:2px}
 .btn-sm{padding:4px 10px;font-size:12px}
 button:disabled{opacity:.4;cursor:not-allowed}
 
+/* Предупреждение о ломающем действии: латунь, но не как кнопка. */
+.warn-note{
+  margin-top:12px;padding:10px 12px;border-radius:5px;font-size:13px;line-height:1.5;
+  color:var(--brass);background:#231b0c;border:1px solid var(--brass-dim)}
+.warn-note b{color:#e3b863}
+.warn-note .mono{font-family:var(--font-mono);font-size:12px}
+
+/* Кнопка во взведённом состоянии — второй клик выполняет действие. */
+button.armed{background:var(--bad);color:#1b0607;border-color:var(--bad);font-weight:600}
+
 /* ── панели ── */
 section.panel{
   background:var(--surface);border:1px solid var(--line);border-radius:8px;
@@ -280,9 +290,7 @@ max, 5, 4</textarea>
 <script>
 // ─────────────── настройки ───────────────
 const CONFIG = {
-  bridge: '0x3711Ca74bd543EaeEC8f650088705a584751a669',
-  // Читать без кошелька. Работает на своём хостинге; внутри артефакта запрос
-  // к внешнему узлу блокируется, поэтому там нужен кошелёк.
+  bridge: '0x4d3B40Bfda2f96cf49C0ed856186597EAdF5210F ',
   fallbackRpc: 'https://ethereum-sepolia-rpc.publicnode.com',
   expectedChainId: 11155111n,
   expectedChainName: 'Sepolia'
@@ -300,6 +308,8 @@ const BRIDGE_ABI = [
   'function addToken(address,uint8,tuple(uint256 sum,uint8 n,uint8 k)[],bytes[])',
   'function addTokenValidator(address,bytes)',
   'function banTokenValidator(address,bytes10)',
+  'function unbanTokenValidator(address,bytes10)',
+  'function setTokenTiers(address,tuple(uint256 sum,uint8 n,uint8 k)[])',
   'function setTokenAllowed(address,bool)',
   'function setInstantCap(address,uint256)',
   'function setAdmin(address)',
@@ -460,6 +470,15 @@ async function loadTokens(){
   const cards = await Promise.all(addrs.map(a => loadToken(a).catch(e => ({
     address:a, error:(e.shortMessage||e.message)
   }))));
+
+  // Индекс по адресу — обработчикам кликов нужны decimals и текущие тиры.
+  // БЕЗ ЭТОГО обработчик лимита парсил сумму с decimals = 0: ввод «100»
+  // для USDC означал бы 100 минимальных единиц вместо 100 USDC, молча.
+  // Ключ в нижнем регистре, как его кладёт discoverTokens и как он попадает
+  // в data-атрибуты.
+  S.tokensById = {};
+  for(const c of cards) S.tokensById[String(c.address).toLowerCase()] = c;
+
   box.innerHTML = cards.map(renderToken).join('');
 }
 
@@ -514,8 +533,12 @@ function renderToken(t){
                  : '<span class="pill pill-off">не активен</span>'))+'</td>'+
       '<td class="num">'+r.from+'</td>'+
       '<td class="num">'+(r.ban || '—')+'</td>'+
-      '<td>'+(S.isAdmin && r.active
-        ? '<button class="btn-danger btn-sm" data-ban="'+esc(t.address)+'|'+esc(r.nid)+'">Забанить</button>'
+      '<td>'+(S.isAdmin
+        ? (r.active
+            ? '<button class="btn-danger btn-sm" data-ban="'+esc(t.address)+'|'+esc(r.nid)+'">Забанить</button>'
+            : (r.ban
+                ? '<button class="btn-sm btn" data-unban="'+esc(t.address)+'|'+esc(r.nid)+'">Разбанить</button>'
+                : ''))
         : '')+'</td>'+
     '</tr>').join('')
     : '<tr><td colspan="6" class="sub">узлов нет</td></tr>';
@@ -535,6 +558,17 @@ function renderToken(t){
       '<button class="btn" data-allow="'+esc(t.address)+'|'+(t.cfg.allowed?'0':'1')+'">'+
         (t.cfg.allowed ? 'Приостановить токен' : 'Возобновить токен')+'</button>'+
     '</div>'+
+    '<div class="row" style="margin-top:12px;align-items:flex-start">'+
+      '<div class="field"><label>Тиры — по одному в строке: сумма, n, k (последняя строка «max»)</label>'+
+        '<textarea data-tiers="'+esc(t.address)+'" spellcheck="false" rows="4">'+
+          esc(tiersToText(t.tiers, dec))+'</textarea></div>'+
+      '<button class="btn-danger" data-settiers="'+esc(t.address)+'">Заменить тиры</button>'+
+    '</div>'+
+    '<div class="warn-note">Замена тиров бампит версию ростера. '+
+      '<b>Незавершённые выводы сломаются</b>: контракт выбирает n и k в момент '+
+      '<span class="mono">unlock</span>, а не при сборе подписей, так что уже '+
+      'собранный кворум может перестать подходить. Делайте это в окно без '+
+      'активных выводов и переподпишите <span class="mono">setCardRosterSig</span>.</div>'+
     '<div data-msg="'+esc(t.address)+'"></div>'
   ) : '';
 
@@ -576,10 +610,14 @@ function parseAddr(v, what){
   if(!ethers.isAddress(s)) throw new Error('Неверный адрес: '+what);
   return ethers.getAddress(s);
 }
+// Те же три правила, что проверяет контракт в setTokenTiers/addToken:
+// 0 < k <= n, sum строго возрастает, последний тир = max.
+// Проверяем здесь, чтобы ошибка была видна до отправки транзакции, а не
+// пришла ревертом Bridge_InvalidTiers без указания строки.
 function parseTiers(text, dec){
   const rows = (text||'').split('\n').map(l=>l.trim()).filter(Boolean);
   if(!rows.length) throw new Error('Нужен хотя бы один тир.');
-  return rows.map((line,i) => {
+  const out = rows.map((line,i) => {
     const p = line.split(',').map(x=>x.trim());
     if(p.length !== 3) throw new Error('Строка '+(i+1)+': нужно три значения через запятую.');
     const sum = /^(max|∞)$/i.test(p[0]) ? MAXU : ethers.parseUnits(p[0], dec);
@@ -588,6 +626,38 @@ function parseTiers(text, dec){
       throw new Error('Строка '+(i+1)+': требуется 0 < k ≤ n.');
     return { sum, n, k };
   });
+  for(let i=1;i<out.length;i++){
+    if(out[i].sum <= out[i-1].sum)
+      throw new Error('Строка '+(i+1)+': сумма должна быть строго больше предыдущей.');
+  }
+  if(out[out.length-1].sum !== MAXU)
+    throw new Error('Последний тир обязан иметь сумму max — иначе вывод на большую сумму упрётся в Bridge_NoTiersForToken.');
+  return out;
+}
+
+// Текущие тиры в формат текстового редактора.
+function tiersToText(tiers, dec){
+  return tiers.map(x => (x.sum === MAXU ? 'max' : fmtAmount(x.sum, dec)) + ', ' + x.n + ', ' + x.k).join('\n');
+}
+
+// Подтверждение в два шага для необратимых и ломающих действий.
+// `confirm()` не используем: он не работает внутри артефактов и в части
+// webview, а молча возвращает false — то есть действие бы просто не
+// происходило без объяснения.
+function armed(btn){
+  if(btn.dataset.armed === '1') return true;
+  btn.dataset.armed = '1';
+  btn.dataset.label = btn.textContent;
+  btn.textContent = 'точно?';
+  btn.classList.add('armed');
+  setTimeout(() => {
+    if(btn.dataset.armed === '1'){
+      btn.dataset.armed = '0';
+      btn.textContent = btn.dataset.label;
+      btn.classList.remove('armed');
+    }
+  }, 4000);
+  return false;
 }
 
 // ─────────────── транзакции ───────────────
@@ -627,7 +697,6 @@ $('addTokenBtn').addEventListener('click', () => {
     dec = Number($('atDec').value);
     if(!Number.isInteger(dec) || dec < 1 || dec > 18) throw new Error('Decimals: целое от 1 до 18.');
     tiers = parseTiers($('atTiers').value, dec);
-    if(tiers[tiers.length-1].sum !== MAXU) throw new Error('Последний тир должен иметь сумму max.');
     pubs = ($('atPubs').value||'').split('\n').map(l=>l.trim()).filter(Boolean).map(parsePub);
     if(!pubs.length) throw new Error('Нужен хотя бы один публичный ключ узла.');
   }catch(e){ return say('atMsg', e.message, 'err'); }
@@ -679,11 +748,37 @@ document.addEventListener('click', e => {
     setTimeout(()=>{ c.textContent='копировать'; }, 1400);
     return;
   }
+  // Бан теперь обратим (unbanTokenValidator в v8), но всё равно выводит узел
+  // из кворума, а nodeId в таблице — похожие друг на друга hex. Два шага.
   const ban = e.target.closest('[data-ban]');
   if(ban){
+    if(!armed(ban)) return;
     const [tok, nid] = ban.dataset.ban.split('|');
     send(document.querySelector('[data-msg="'+tok+'"]'), 'Бан узла',
       () => S.bridge.banTokenValidator(tok, nid));
+    return;
+  }
+  const unban = e.target.closest('[data-unban]');
+  if(unban){
+    if(!armed(unban)) return;
+    const [tok, nid] = unban.dataset.unban.split('|');
+    send(document.querySelector('[data-msg="'+tok+'"]'), 'Разбан узла',
+      () => S.bridge.unbanTokenValidator(tok, nid));
+    return;
+  }
+  const st = e.target.closest('[data-settiers]');
+  if(st){
+    const tok = st.dataset.settiers;
+    const box = document.querySelector('[data-msg="'+tok+'"]');
+    const t = S.tokensById?.[String(tok).toLowerCase()];
+    if(!t) return say(box, 'Данные токена не загружены.', 'err');
+    let tiers;
+    // Разбор ДО взведения: при ошибке в строках нет смысла спрашивать
+    // подтверждение — показываем, что именно не так.
+    try{ tiers = parseTiers(document.querySelector('[data-tiers="'+tok+'"]').value, t.decimals); }
+    catch(err){ return say(box, err.message, 'err'); }
+    if(!armed(st)) return say(box, 'Нажмите ещё раз, чтобы заменить тиры. Незавершённые выводы сломаются.', 'info');
+    send(box, 'Замена тиров', () => S.bridge.setTokenTiers(tok, tiers));
     return;
   }
   const av = e.target.closest('[data-addval]');
@@ -700,12 +795,14 @@ document.addEventListener('click', e => {
   if(cap){
     const tok = cap.dataset.setcap;
     const box = document.querySelector('[data-msg="'+tok+'"]');
-    const t = S.tokensById?.[tok];
+    const t = S.tokensById?.[String(tok).toLowerCase()];
     let val;
     try{
       const raw = document.querySelector('[data-cap="'+tok+'"]').value.trim();
       if(!raw) throw new Error('Укажите лимит.');
-      val = ethers.parseUnits(raw, t ? t.decimals : 0);
+      // Никакого fallback на 0: неверные decimals дают неверную сумму молча.
+      if(!t) throw new Error('Данные токена не загружены — обновите страницу.');
+      val = ethers.parseUnits(raw, t.decimals);
     }catch(err){ return say(box, err.message, 'err'); }
     send(box, 'Установка лимита', () => S.bridge.setInstantCap(tok, val));
     return;
