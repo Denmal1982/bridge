@@ -91,6 +91,12 @@ section.panel{
 .pill-bad{color:var(--bad);background:#2a1618}
 .pill-off{color:var(--faint);background:#1c222e}
 .pill-brass{color:var(--brass);background:#2a2110}
+.pill-warn{color:#e3b863;background:#2a2110}
+tr.live-warn td{background:#231d12}
+tr.live-hide{display:none}
+.live-bar{display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin:4px 0 10px;font-size:13px;color:var(--muted)}
+.live-bar label{display:inline-flex;gap:6px;align-items:center;cursor:pointer}
+.live-bar input{width:auto}
 
 /* ── таблицы ── */
 .tw{overflow-x:auto;margin:0 -16px;padding:0 16px}
@@ -201,6 +207,22 @@ code{font-family:var(--font-mono);font-size:12px;background:var(--surface-2);
       <p class="hint">Список собирается из событий <code>TokenAdded</code>. Если узел RPC
         ограничивает глубину поиска по логам, добавьте адрес вручную — он сохранится в браузере.</p>
       <div id="tokMsg"></div>
+      <div class="row" style="margin-top:14px">
+        <div class="field">
+          <label for="tokSel">Токен</label>
+          <select id="tokSel" disabled><option>—</option></select>
+        </div>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <div class="field">
+          <label for="nodeUrl">Адрес узла сети — откуда брать, какие узлы работают</label>
+          <input id="nodeUrl" placeholder="http://192.168.1.10:5104 — лучше наблюдатель" autocomplete="off">
+        </div>
+        <button class="btn" id="nodeUrlBtn">Опрашивать</button>
+      </div>
+      <p class="hint">Страница раз в 10 с читает <code>/api/status</code> этого узла: какие
+        валидаторы активны в цепи, кто пропускает раунды, кто забанен. Адрес сохранится в браузере.</p>
+      <div id="netMsg"></div>
     </div>
     <div id="tokens"></div>
   </section>
@@ -353,6 +375,9 @@ function say(el, text, kind){
 // Ключ привязан к адресу моста: после передеплоя вручную добавленные токены
 // от прежнего контракта не должны всплывать в списке нового и падать
 // карточками с ошибкой.
+function prefGet(k){ try{ return localStorage.getItem('cbadm:'+CONFIG.bridge.toLowerCase()+':'+k) || ''; }catch(e){ return ''; } }
+function prefPut(k, v){ try{ localStorage.setItem('cbadm:'+CONFIG.bridge.toLowerCase()+':'+k, v); }catch(e){} }
+
 function storeKey(){
   return 'cb_manual_tokens_' + String(CONFIG.bridge).toLowerCase();
 }
@@ -525,6 +550,7 @@ async function loadTokens(){
   $('tokCount').textContent = addrs.length ? (addrs.length+' в списке') : '';
 
   if(!addrs.length){
+    $('tokSel').innerHTML = '<option>—</option>'; $('tokSel').disabled = true;
     box.innerHTML = '<div class="panel-body"><div class="empty">'+
       'Ни одного токена не найдено. Добавьте его через «Управление» или введите адрес вручную.'+
       '</div></div>';
@@ -542,8 +568,29 @@ async function loadTokens(){
   // в data-атрибуты.
   S.tokensById = {};
   for(const c of cards) S.tokensById[String(c.address).toLowerCase()] = c;
+  S.tokenOrder = cards.map(c => String(c.address).toLowerCase());
 
-  box.innerHTML = cards.map(renderToken).join('');
+  // Выбранный токен: запомненный, иначе токен сети узла, иначе первый.
+  let sel = (S.selTok || prefGet('token')).toLowerCase();
+  if(!S.tokensById[sel]) sel = (S.live?.bridge_token || '').toLowerCase();
+  if(!S.tokensById[sel]) sel = S.tokenOrder[0];
+  S.selTok = sel;
+  const opt = c => {
+    const label = c.error ? ('ошибка чтения — '+c.address)
+      : ((c.symbol || 'без тикера')+(c.name ? ' — '+c.name : '')+' — '+c.address);
+    return '<option value="'+esc(String(c.address).toLowerCase())+'">'+esc(label)+'</option>';
+  };
+  const ts = $('tokSel');
+  ts.innerHTML = cards.map(opt).join('');
+  ts.value = sel;
+  ts.disabled = cards.length < 2;
+  renderSelected();
+}
+
+function renderSelected(){
+  const t = S.tokensById?.[S.selTok];
+  $('tokens').innerHTML = t ? renderToken(t) : '';
+  paintLive();
 }
 
 async function loadToken(address){
@@ -570,6 +617,95 @@ async function loadToken(address){
            symbol:sym, name:nm, decimals: dec===null ? Number(cfg.tokenDecimals) : Number(dec) };
 }
 
+// ─────────────── работающие узлы (по /api/status узла сети) ───────────────
+function nidKey(nid){ return String(nid).toLowerCase().replace(/^0x/,''); }
+
+function nodeBase(){
+  let u = ($('nodeUrl').value || '').trim().replace(/\/+$/,'');
+  if(u && !/^https?:\/\//.test(u)) u = 'http://'+u;
+  return u;
+}
+
+async function pollLive(){
+  const base = nodeBase();
+  if(!base){ S.live = null; S.liveErr = null; paintLive(); return; }
+  try{
+    const ctl = new AbortController();
+    const tm = setTimeout(() => ctl.abort(), 6000);
+    const r = await fetch(base+'/api/status', {signal: ctl.signal, cache: 'no-store'});
+    clearTimeout(tm);
+    const j = await r.json();
+    if(!j || j.ok === false) throw new Error(j?.error || 'узел ответил ошибкой');
+    S.live = j; S.liveErr = null; S.liveAt = new Date();
+    // Токен ещё не выбирали — показать токен сети этого узла.
+    const lt = (j.bridge_token || '').toLowerCase();
+    if(!prefGet('token') && S.tokensById?.[lt] && S.selTok !== lt){
+      S.selTok = lt; $('tokSel').value = lt; renderSelected(); return;
+    }
+  }catch(e){
+    S.live = null;
+    const mixed = location.protocol === 'https:' && base.startsWith('http:');
+    S.liveErr = mixed
+      ? 'Страница открыта по https, а узел — по http: браузер запрещает такой запрос. Откройте страницу с диска или по http.'
+      : 'Узел '+base+' не ответил: '+(e.name === 'AbortError' ? 'нет ответа за 6 с' : e.message);
+  }
+  paintLive();
+}
+
+// Состояние узла в сети L2 по снимку статуса.
+function liveState(nid){
+  const L = S.live, k = nidKey(nid);
+  if((L.banned||[]).some(x => nidKey(x) === k)) return {cls:'pill-bad', text:'забанен в цепи', ok:false};
+  if((L.active||[]).some(x => nidKey(x) === k)){
+    const sk = (L.skips||[]).find(x => nidKey(x.node) === k);
+    if(sk && sk.skips > 0) return {cls:'pill-warn', text:'молчит ('+sk.skips+' раунд.)', ok:false};
+    return {cls:'pill-ok', text:'работает', ok:true};
+  }
+  return {cls:'pill-off', text:'не в сети', ok:false};
+}
+
+function paintLive(){
+  const msg = $('netMsg');
+  const L = S.live;
+  if(S.liveErr) say(msg, S.liveErr, 'err');
+  else if(!L) say(msg, '');
+  else {
+    const other = L.bridge_contract && L.bridge_contract.toLowerCase() !== CONFIG.bridge.toLowerCase();
+    say(msg, other
+      ? 'Узел работает с другим мостом ('+L.bridge_contract+') — его сеть к этому контракту не относится.'
+      : 'Узел сети: высота '+L.height+', состояние «'+L.state+'», активных валидаторов '+(L.active||[]).length+
+        ', обновлено '+S.liveAt.toLocaleTimeString()+'.', other ? 'err' : 'info');
+  }
+  const t = S.tokensById?.[S.selTok];
+  const cells = document.querySelectorAll('[data-live]');
+  const count = $('liveCount');
+  // Сеть L2 обслуживает один токен (NT1): колонка — только для него.
+  const ours = L && t && L.bridge_token && L.bridge_token.toLowerCase() === S.selTok
+    && (!L.bridge_contract || L.bridge_contract.toLowerCase() === CONFIG.bridge.toLowerCase());
+  let work = 0, total = 0;
+  cells.forEach(td => {
+    const tr = td.closest('tr');
+    total++;
+    if(!ours){
+      const why = !L ? '—'
+        : (L.bridge_contract && L.bridge_contract.toLowerCase() !== CONFIG.bridge.toLowerCase())
+          ? 'узел другого моста' : 'сеть узла — другой токен';
+      td.innerHTML = '<span class="sub">'+why+'</span>';
+      tr.classList.remove('live-warn','live-hide');
+      return;
+    }
+    const st = liveState(td.dataset.live);
+    if(st.ok) work++;
+    td.innerHTML = '<span class="pill '+st.cls+'">'+esc(st.text)+'</span>';
+    // Активен в контракте, а в сети не работает — кандидат на бан.
+    tr.classList.toggle('live-warn', !st.ok && tr.dataset.cactive === '1');
+    tr.classList.toggle('live-hide', !!S.onlyLive && !st.ok);
+  });
+  if(count) count.textContent = ours ? ('работает '+work+' из '+total) : '';
+  const only = $('onlyLive');
+  if(only) only.disabled = !ours;
+}
+
 function fmtAmount(v, dec){
   try{ return ethers.formatUnits(v, dec ?? 0); }catch(e){ return v.toString(); }
 }
@@ -588,13 +724,14 @@ function renderToken(t){
     : '<tr><td colspan="3" class="sub">тиры не заданы</td></tr>';
 
   const nodeRows = t.recs.length ? t.recs.map(r =>
-    '<tr>'+
+    '<tr data-row="'+esc(nidKey(r.nid))+'" data-cactive="'+(r.active?'1':'0')+'">'+
       '<td class="mono">'+esc(r.nid)+'</td>'+
       '<td class="mono" style="color:var(--muted)">'+esc(r.addr)+'</td>'+
       '<td>'+(r.active
         ? '<span class="pill pill-ok">активен</span>'
         : (r.ban ? '<span class="pill pill-bad">забанен</span>'
                  : '<span class="pill pill-off">не активен</span>'))+'</td>'+
+      '<td data-live="'+esc(nidKey(r.nid))+'"><span class="sub">—</span></td>'+
       '<td class="num">'+r.from+'</td>'+
       '<td class="num">'+(r.ban || '—')+'</td>'+
       '<td>'+(S.isAdmin
@@ -605,7 +742,7 @@ function renderToken(t){
                 : ''))
         : '')+'</td>'+
     '</tr>').join('')
-    : '<tr><td colspan="6" class="sub">узлов нет</td></tr>';
+    : '<tr><td colspan="7" class="sub">узлов нет</td></tr>';
 
   const adminBlock = S.isAdmin ? (
     '<div class="divider"></div>'+
@@ -651,8 +788,12 @@ function renderToken(t){
       '<div><dt>Decimals</dt><dd>'+dec+'</dd></div>'+
     '</div>'+
     '<h3>Узлы</h3>'+
+    '<div class="live-bar" data-livebar="'+esc(String(t.address).toLowerCase())+'">'+
+      '<span id="liveCount"></span>'+
+      '<label><input type="checkbox" id="onlyLive"'+(S.onlyLive?' checked':'')+'> только работающие</label>'+
+    '</div>'+
     '<div class="tw"><table><thead><tr>'+
-      '<th class="mono">nodeId (10 байт)</th><th>eth-адрес</th><th>состояние</th>'+
+      '<th class="mono">nodeId (10 байт)</th><th>eth-адрес</th><th>в контракте</th><th>в сети L2</th>'+
       '<th class="num">активен с</th><th class="num">бан в</th><th></th>'+
     '</tr></thead><tbody>'+nodeRows+'</tbody></table></div>'+
     '<h3 style="margin-top:18px">Тиры подписей</h3>'+
@@ -741,7 +882,30 @@ async function send(msgEl, label, fn){
 
 // ─────────────── обработчики ───────────────
 $('connectBtn').addEventListener('click', connect);
-$('refreshBtn').addEventListener('click', () => loadAll());
+$('refreshBtn').addEventListener('click', () => { loadAll(); pollLive(); });
+
+$('tokSel').addEventListener('change', e => {
+  S.selTok = e.target.value;
+  prefPut('token', S.selTok);
+  renderSelected();
+});
+
+$('nodeUrlBtn').addEventListener('click', () => {
+  const u = nodeBase();
+  $('nodeUrl').value = u;
+  prefPut('node', u);
+  pollLive();
+});
+
+document.addEventListener('change', e => {
+  if(e.target && e.target.id === 'onlyLive'){
+    S.onlyLive = e.target.checked;
+    prefPut('onlyLive', S.onlyLive ? '1' : '');
+    paintLive();
+  }
+});
+
+setInterval(() => { if(nodeBase() && !document.hidden) pollLive(); }, 10000);
 
 $('addManualBtn').addEventListener('click', () => {
   try{
@@ -749,6 +913,7 @@ $('addManualBtn').addEventListener('click', () => {
     const list = storeGet();
     if(!list.some(x => x.toLowerCase() === a.toLowerCase())){ list.push(a); storePut(list); }
     $('manualToken').value = '';
+    S.selTok = a.toLowerCase(); prefPut('token', S.selTok);
     say('tokMsg','');
     loadTokens();
   }catch(e){ say('tokMsg', e.message, 'err'); }
@@ -897,6 +1062,9 @@ if(window.ethereum){
 })();
 
 async function start(){
+  $('nodeUrl').value = prefGet('node');
+  S.onlyLive = prefGet('onlyLive') === '1';
+  if(nodeBase()) pollLive();
   $('cAddr').innerHTML = esc(CONFIG.bridge)+'<button class="copy" data-copy="cAddr">копировать</button>';
   try{
     // Уже разрешённый кошелёк подключаем сам, только если он в сети моста.
