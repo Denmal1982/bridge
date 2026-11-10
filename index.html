@@ -146,7 +146,7 @@ code{font-family:var(--font-mono);font-size:12px;background:var(--surface-2);
   <div class="top-in">
     <div class="brand">
       <b>Консоль моста</b>
-      <span>CashBridge v7</span>
+      <span>CashBridge v8</span>
     </div>
     <span class="chain" id="chainBadge">сеть не определена</span>
     <span class="pill pill-off" id="roleBadge">только чтение</span>
@@ -290,11 +290,19 @@ max, 5, 4</textarea>
 <script>
 // ─────────────── настройки ───────────────
 const CONFIG = {
+  // CashBridge v8, Sepolia. Предыдущий v7 жил по
+  // 0x3711Ca74bd543EaeEC8f650088705a584751a669 — там нет unbanTokenValidator
+  // и нет потолка u64 в lock.
   bridge: '0x4d3B40Bfda2f96cf49C0ed856186597EAdF5210F',
+  // Читать без кошелька. Работает на своём хостинге; внутри артефакта запрос
+  // к внешнему узлу блокируется, поэтому там нужен кошелёк.
   fallbackRpc: 'https://ethereum-sepolia-rpc.publicnode.com',
-  expectedChainId: 11155111,
-  expectedChainName: 'Sepolia'
+  expectedChainId: 11155111n,
+  expectedChainName: 'Sepolia',
+  // Для «добавить сеть в кошелёк», если её там нет.
+  expectedExplorer: 'https://sepolia.etherscan.io'
 };
+const CHAIN_HEX = '0x' + CONFIG.expectedChainId.toString(16);
 
 const BRIDGE_ABI = [
   'function admin() view returns (address)',
@@ -326,7 +334,7 @@ const MAXU = (1n << 256n) - 1n;
 
 // ─────────────── состояние ───────────────
 const S = {
-  provider:null, signer:null, account:null, chainId:null,
+  provider:null, signer:null, account:null, chainId:null, walletChain:null, switching:false,
   bridge:null, admin:null, gateway:null, isAdmin:false,
   tokens:[], manual:[]
 };
@@ -342,17 +350,50 @@ function say(el, text, kind){
   n.innerHTML = '<div class="msg msg-'+kind+'">'+esc(text)+'</div>';
 }
 
+// Ключ привязан к адресу моста: после передеплоя вручную добавленные токены
+// от прежнего контракта не должны всплывать в списке нового и падать
+// карточками с ошибкой.
+function storeKey(){
+  return 'cb_manual_tokens_' + String(CONFIG.bridge).toLowerCase();
+}
 function storeGet(){
-  try{ return JSON.parse(localStorage.getItem('cb_manual_tokens')||'[]'); }catch(e){ return []; }
+  try{ return JSON.parse(localStorage.getItem(storeKey())||'[]'); }catch(e){ return []; }
 }
 function storePut(list){
-  try{ localStorage.setItem('cb_manual_tokens', JSON.stringify(list)); }catch(e){}
+  try{ localStorage.setItem(storeKey(), JSON.stringify(list)); }catch(e){}
 }
 
 // ─────────────── подключение ───────────────
+// Сеть, выбранная в кошельке (null — кошелька нет или он не ответил).
+async function walletChain(){
+  if(!window.ethereum) return null;
+  try{ return BigInt(await window.ethereum.request({method:'eth_chainId'})); }catch(e){ return null; }
+}
+
+// Попросить кошелёк перейти в сеть моста; если её там нет — добавить.
+async function switchWallet(){
+  try{
+    await window.ethereum.request({method:'wallet_switchEthereumChain', params:[{chainId: CHAIN_HEX}]});
+  }catch(e){
+    const code = e?.code ?? e?.data?.originalError?.code;
+    if(code !== 4902) throw e;
+    await window.ethereum.request({method:'wallet_addEthereumChain', params:[{
+      chainId: CHAIN_HEX, chainName: CONFIG.expectedChainName,
+      nativeCurrency: {name: CONFIG.expectedChainName+' ETH', symbol: 'ETH', decimals: 18},
+      rpcUrls: [CONFIG.fallbackRpc], blockExplorerUrls: [CONFIG.expectedExplorer]
+    }]});
+  }
+}
+
+// Чтение без подключения: через кошелёк, только если он в сети моста;
+// иначе — через резервный RPC (кошелёк может стоять в любой другой сети).
 async function readProvider(){
+  S.walletChain = await walletChain();
+  if(window.ethereum && S.walletChain === CONFIG.expectedChainId) return new ethers.BrowserProvider(window.ethereum);
+  if(CONFIG.fallbackRpc){
+    return new ethers.JsonRpcProvider(CONFIG.fallbackRpc, Number(CONFIG.expectedChainId), {staticNetwork: true});
+  }
   if(window.ethereum) return new ethers.BrowserProvider(window.ethereum);
-  if(CONFIG.fallbackRpc) return new ethers.JsonRpcProvider(CONFIG.fallbackRpc);
   return null;
 }
 
@@ -363,15 +404,32 @@ async function connect(){
     return;
   }
   try{
+    // Смена сети в кошельке перезагружает страницу — на время подключения нет.
+    S.switching = true;
+    await window.ethereum.request({method:'eth_requestAccounts'});
+    if(await walletChain() !== CONFIG.expectedChainId){
+      say('connMsg','Подтвердите в кошельке переход в сеть '+CONFIG.expectedChainName+'.','info');
+      await switchWallet();
+    }
+    S.walletChain = await walletChain();
+    if(S.walletChain !== CONFIG.expectedChainId){
+      say('connMsg','Кошелёк остался в сети chainId '+S.walletChain+'. Переключите его на '+
+        CONFIG.expectedChainName+' — действия админа в другой сети не сработают.','err');
+      return;
+    }
     const p = new ethers.BrowserProvider(window.ethereum);
-    await p.send('eth_requestAccounts', []);
     S.provider = p;
     S.signer = await p.getSigner();
     S.account = await S.signer.getAddress();
     say('connMsg','');
     await loadAll();
   }catch(e){
-    say('connMsg', 'Подключиться не удалось: '+(e.shortMessage||e.message), 'err');
+    const code = e?.code ?? e?.info?.error?.code;
+    say('connMsg', (code === 4001 || code === 'ACTION_REJECTED')
+      ? 'Отменено в кошельке. Без сети '+CONFIG.expectedChainName+' действия админа недоступны.'
+      : 'Подключиться не удалось: '+(e.shortMessage||e.message), 'err');
+  }finally{
+    setTimeout(() => { S.switching = false; }, 1500);
   }
 }
 
@@ -396,8 +454,14 @@ async function loadAll(){
       S.bridge.cardGateway().catch(()=>ZERO)
     ]);
     if(admin === null){
-      say('connMsg','По адресу '+CONFIG.bridge+' контракт не отвечает. Проверьте сеть в кошельке.','err');
+      say('connMsg','По адресу '+CONFIG.bridge+' в сети chainId '+S.chainId+' контракт не отвечает.'+
+        (S.chainId === CONFIG.expectedChainId ? ' Проверьте адрес моста в настройках страницы или доступность RPC.'
+                                              : ' Мост работает в сети '+CONFIG.expectedChainName+'.'),'err');
       return;
+    }
+    if(!S.account && window.ethereum && S.walletChain !== CONFIG.expectedChainId){
+      say('connMsg','Кошелёк сейчас в сети chainId '+S.walletChain+' — читаю через резервный RPC. '+
+        '«Подключить кошелёк» попросит перейти в '+CONFIG.expectedChainName+'.','info');
     }
     S.admin = admin; S.gateway = gw;
     S.isAdmin = !!S.account && S.account.toLowerCase() === admin.toLowerCase();
@@ -818,7 +882,7 @@ document.addEventListener('click', e => {
 
 if(window.ethereum){
   window.ethereum.on?.('accountsChanged', () => location.reload());
-  window.ethereum.on?.('chainChanged', () => location.reload());
+  window.ethereum.on?.('chainChanged', () => { if(!S.switching) location.reload(); });
 }
 
 // ─────────────── старт ───────────────
@@ -835,10 +899,12 @@ if(window.ethereum){
 async function start(){
   $('cAddr').innerHTML = esc(CONFIG.bridge)+'<button class="copy" data-copy="cAddr">копировать</button>';
   try{
+    // Уже разрешённый кошелёк подключаем сам, только если он в сети моста.
     if(window.ethereum){
-      const p = new ethers.BrowserProvider(window.ethereum);
-      const accts = await p.send('eth_accounts', []);
-      if(accts.length){
+      const accts = await window.ethereum.request({method:'eth_accounts'});
+      S.walletChain = await walletChain();
+      if(accts.length && S.walletChain === CONFIG.expectedChainId){
+        const p = new ethers.BrowserProvider(window.ethereum);
         S.provider = p; S.signer = await p.getSigner(); S.account = accts[0];
       }
     }
