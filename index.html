@@ -152,7 +152,7 @@ code{font-family:var(--font-mono);font-size:12px;background:var(--surface-2);
   <div class="top-in">
     <div class="brand">
       <b>Консоль моста</b>
-      <span>CashBridge v8</span>
+      <span>CashBridge v9</span>
     </div>
     <span class="chain" id="chainBadge">сеть не определена</span>
     <span class="pill pill-off" id="roleBadge">только чтение</span>
@@ -253,8 +253,10 @@ max, 5, 4</textarea>
           <b>n</b> — сколько подписантов выбирается, <b>k</b> — сколько подписей требуется.</p>
       </div>
       <div class="field">
-        <label for="atPubs">Публичные ключи узлов — по одному в строке, 64 байта (128 hex)</label>
-        <textarea id="atPubs" spellcheck="false" placeholder="0x… 128 hex-символов"></textarea>
+        <label for="atPubs">Строки регистрации узлов — по одной в строке, 193 байта (386 hex)</label>
+        <textarea id="atPubs" spellcheck="false" placeholder="0x… 386 hex-символов — печатает узел"></textarea>
+        <p class="hint">Строку печатает сам узел: ключ r1, подпись k1 под ним и подпись r1 под адресом k1.
+          Перед отправкой каждая строка проверяется, результат показан ниже.</p>
       </div>
       <button class="btn-primary" id="addTokenBtn" disabled>Добавить токен</button>
       <div id="atMsg"></div>
@@ -287,18 +289,18 @@ max, 5, 4</textarea>
   </section>
 
   <section class="panel">
-    <div class="panel-head"><h2>Проверка nodeId</h2></div>
+    <div class="panel-head"><h2>Проверка строки регистрации</h2></div>
     <div class="panel-body">
       <div class="row">
         <div class="field">
-          <label for="nidPub">Публичный ключ узла (64 байта)</label>
-          <input id="nidPub" placeholder="0x… 128 hex-символов" autocomplete="off">
+          <label for="nidPub">Строка регистрации узла (193 байта) или только ключ r1 (64 байта)</label>
+          <input id="nidPub" placeholder="0x… 386 или 128 hex-символов" autocomplete="off">
         </div>
         <button class="btn" id="nidBtn">Посчитать</button>
       </div>
-      <p class="hint">Сверяет расчёт контракта с локальным: nodeId — последние 10 байт
-        <code>sha256(pubX‖pubY)</code>, eth-адрес — последние 20 байт <code>keccak256</code>
-        того же ключа. Значения должны совпасть с тем, что показывает узел.</p>
+      <p class="hint">Показывает, что контракт получит из строки: nodeId — последние 10 байт
+        <code>sha256(X‖Y)</code> ключа r1 (так же его считает карта), адрес k1 — из подписи k1,
+        и проходит ли подпись r1 проверку в сети. Значения должны совпасть с тем, что показывает узел.</p>
       <div id="nidMsg"></div>
     </div>
   </section>
@@ -312,9 +314,10 @@ max, 5, 4</textarea>
 <script>
 // ─────────────── настройки ───────────────
 const CONFIG = {
-  // CashBridge v8, Sepolia. Предыдущий v7 жил по
-  // 0x3711Ca74bd543EaeEC8f650088705a584751a669 — там нет unbanTokenValidator
-  // и нет потолка u64 в lock.
+  // АДРЕС МОСТА. Страница рассчитана на CashBridge v9 (валидатор
+  // регистрируется строкой из 193 байт). Ниже пока стоит адрес v8 на
+  // Sepolia — ЗАМЕНИТЕ его адресом v9 после развёртывания. Пока адрес
+  // указывает на v8, страница это заметит и добавлять узлы не даст.
   bridge: '0x4d3B40Bfda2f96cf49C0ed856186597EAdF5210F',
   // Читать без кошелька. Работает на своём хостинге; внутри артефакта запрос
   // к внешнему узлу блокируется, поэтому там нужен кошелёк.
@@ -335,6 +338,8 @@ const BRIDGE_ABI = [
   'function getTokenTiers(address) view returns (tuple(uint256 sum,uint8 n,uint8 k)[])',
   'function lockedBalance(address) view returns (uint256)',
   'function nodeIdFromPubkey(bytes) pure returns (bytes10)',
+  'function validatorK1Digest(bytes32,bytes32) view returns (bytes32)',
+  'function validatorR1Digest(address) view returns (bytes32)',
   'function addToken(address,uint8,tuple(uint256 sum,uint8 n,uint8 k)[],bytes[])',
   'function addTokenValidator(address,bytes)',
   'function banTokenValidator(address,bytes10)',
@@ -748,8 +753,8 @@ function renderToken(t){
     '<div class="divider"></div>'+
     '<h3 class="brass">Действия с токеном</h3>'+
     '<div class="row">'+
-      '<div class="field"><label>Публичный ключ нового узла (64 байта)</label>'+
-        '<input data-pub="'+esc(t.address)+'" placeholder="0x… 128 hex-символов" autocomplete="off"></div>'+
+      '<div class="field"><label>Строка регистрации нового узла (193 байта)</label>'+
+        '<input data-pub="'+esc(t.address)+'" placeholder="0x… 386 hex-символов — печатает узел" autocomplete="off"></div>'+
       '<button class="btn-primary" data-addval="'+esc(t.address)+'">Добавить узел</button>'+
     '</div>'+
     '<div class="row" style="margin-top:12px">'+
@@ -793,7 +798,7 @@ function renderToken(t){
       '<label><input type="checkbox" id="onlyLive"'+(S.onlyLive?' checked':'')+'> только работающие</label>'+
     '</div>'+
     '<div class="tw"><table><thead><tr>'+
-      '<th class="mono">nodeId (10 байт)</th><th>eth-адрес</th><th>в контракте</th><th>в сети L2</th>'+
+      '<th class="mono">nodeId (10 байт)</th><th>адрес k1 (вывод)</th><th>в контракте</th><th>в сети L2</th>'+
       '<th class="num">активен с</th><th class="num">бан в</th><th></th>'+
     '</tr></thead><tbody>'+nodeRows+'</tbody></table></div>'+
     '<h3 style="margin-top:18px">Тиры подписей</h3>'+
@@ -805,10 +810,59 @@ function renderToken(t){
 }
 
 // ─────────────── разбор ввода ───────────────
-function parsePub(v){
+// v9: строка регистрации узла — pubR1 (64) ‖ sigK1 (65) ‖ sigR1 (64).
+function parseReg(v){
   const s = (v||'').trim().toLowerCase().replace(/^0x/,'');
-  if(!/^[0-9a-f]{128}$/.test(s)) throw new Error('Ключ должен быть 128 hex-символов (64 байта), без префикса 0x04.');
+  if(/^[0-9a-f]{128}$/.test(s)) throw new Error('Это ключ (64 байта), а нужна строка регистрации из 193 байт — её печатает узел.');
+  if(!/^[0-9a-f]{386}$/.test(s)) throw new Error('Строка регистрации должна быть 386 hex-символов (193 байта).');
   return '0x'+s;
+}
+const P256_VERIFY = '0x0000000000000000000000000000000000000100';
+// Что контракт получит из строки. Хеши считаются здесь, по тем же формулам,
+// что в контракте (`validatorK1Digest`, `validatorR1Digest`), и сверяются с
+// ним; подпись r1 проверяется той же предкомпиляцией 0x100, что вызовет мост.
+//   r1ok: true / false / null (сеть недоступна — проверить не удалось)
+async function inspectReg(reg){
+  const h = reg.slice(2);
+  const pub = '0x'+h.slice(0,128), sigK = '0x'+h.slice(128,258), sigR = '0x'+h.slice(258);
+  const nodeId = '0x'+ethers.sha256(pub).slice(-20);
+  const chain = ethers.zeroPadValue(ethers.toBeHex(S.chainId ?? CONFIG.expectedChainId), 32);
+  const dK = ethers.sha256(ethers.concat([ethers.toUtf8Bytes('minterV1 VALIDATOR K1'), chain, CONFIG.bridge, pub]));
+  let v = parseInt(sigK.slice(-2), 16); if(v < 27) v += 27;
+  let addr;
+  try{ addr = ethers.recoverAddress(dK, { r:'0x'+sigK.slice(2,66), s:'0x'+sigK.slice(66,130), v }); }
+  catch(e){ throw new Error('Подпись k1 в строке не разбирается: '+(e.shortMessage||e.message)); }
+  const dR = ethers.sha256(ethers.concat([ethers.toUtf8Bytes('minterV1 VALIDATOR R1'), chain, CONFIG.bridge, addr]));
+  let r1ok = null, isV9 = null, formulas = null;
+  if(S.provider){
+    try{
+      const out = await S.provider.call({ to:P256_VERIFY, data: ethers.concat([dR, sigR, pub]) });
+      r1ok = /^0x0{63}1$/.test(out);
+    }catch(e){ r1ok = null; }
+  }
+  if(S.bridge){
+    try{
+      const [cK, cR] = await Promise.all([
+        S.bridge.validatorK1Digest('0x'+h.slice(0,64), '0x'+h.slice(64,128)),
+        S.bridge.validatorR1Digest(addr)]);
+      isV9 = true; formulas = cK === dK && cR === dR;
+    }catch(e){ isV9 = false; }
+  }
+  return { pub, nodeId, addr, r1ok, isV9, formulas };
+}
+function regVerdict(i){
+  if(i.isV9 === false) return 'По адресу моста не CashBridge v9: строку регистрации он не примет. Замените адрес моста в настройках страницы.';
+  if(i.formulas === false) return 'Страница и контракт считают хеши регистрации по-разному — отправлять нельзя.';
+  if(i.r1ok === false) return 'Подпись r1 не проходит проверку: строка испорчена, выпущена для другого моста или другой сети.';
+  return null;
+}
+function regHtml(i){
+  return '<div style="font-family:var(--font-mono);line-height:1.8;word-break:break-all">'+
+    'nodeId&nbsp; '+esc(i.nodeId)+'<br>'+
+    'адрес k1&nbsp; '+esc(i.addr)+'<br>'+
+    'ключ r1&nbsp; '+esc(i.pub)+'<br>'+
+    'подпись r1&nbsp; '+(i.r1ok === true ? 'верна' : i.r1ok === false ? 'НЕ ВЕРНА' : 'не проверена — сеть недоступна')+
+  '</div>';
 }
 function parseAddr(v, what){
   const s = (v||'').trim();
@@ -926,10 +980,24 @@ $('addTokenBtn').addEventListener('click', () => {
     dec = Number($('atDec').value);
     if(!Number.isInteger(dec) || dec < 1 || dec > 18) throw new Error('Decimals: целое от 1 до 18.');
     tiers = parseTiers($('atTiers').value, dec);
-    pubs = ($('atPubs').value||'').split('\n').map(l=>l.trim()).filter(Boolean).map(parsePub);
-    if(!pubs.length) throw new Error('Нужен хотя бы один публичный ключ узла.');
+    pubs = ($('atPubs').value||'').split('\n').map(l=>l.trim()).filter(Boolean).map(parseReg);
+    if(!pubs.length) throw new Error('Нужна хотя бы одна строка регистрации узла.');
   }catch(e){ return say('atMsg', e.message, 'err'); }
-  send('atMsg','Добавление токена', () => S.bridge.addToken(token, dec, tiers, pubs));
+  const btn = $('addTokenBtn'), key = token+'|'+pubs.join('|');
+  // Первое нажатие — проверка строк и показ; второе с теми же данными — отправка.
+  if(btn.dataset.checked === key){ btn.dataset.checked = ''; return send('atMsg','Добавление токена', () => S.bridge.addToken(token, dec, tiers, pubs)); }
+  (async () => {
+    let html = '', bad = null;
+    for(let n = 0; n < pubs.length; n++){
+      let i;
+      try{ i = await inspectReg(pubs[n]); }catch(e){ return say('atMsg', 'Строка '+(n+1)+': '+e.message, 'err'); }
+      const v = regVerdict(i); if(v && !bad) bad = 'Строка '+(n+1)+': '+v;
+      html += '<div style="margin-bottom:8px"><b>Узел '+(n+1)+'</b>'+regHtml(i)+'</div>';
+    }
+    if(bad){ $('atMsg').innerHTML = '<div class="msg msg-err">'+html+esc(bad)+'</div>'; return; }
+    btn.dataset.checked = key;
+    $('atMsg').innerHTML = '<div class="msg msg-info">'+html+'Сверьте с тем, что показывают узлы, и нажмите «Добавить токен» ещё раз.</div>';
+  })();
 });
 
 $('setAdminBtn').addEventListener('click', () => {
@@ -947,25 +1015,31 @@ $('setGwBtn').addEventListener('click', () => {
 });
 
 $('nidBtn').addEventListener('click', async () => {
-  let pub;
-  try{ pub = parsePub($('nidPub').value); }
+  const raw = ($('nidPub').value||'').trim().toLowerCase().replace(/^0x/,'');
+  // Только ключ r1 — показываем nodeId и сверяем формулу с контрактом.
+  if(/^[0-9a-f]{128}$/.test(raw)){
+    const pub = '0x'+raw, local = '0x' + ethers.sha256(pub).slice(-20);
+    let onchain = null;
+    try{ if(S.bridge) onchain = await S.bridge.nodeIdFromPubkey(pub); }catch(e){}
+    const agree = onchain && onchain.toLowerCase() === local.toLowerCase();
+    $('nidMsg').innerHTML =
+      '<div class="msg msg-'+(onchain ? (agree?'ok':'err') : 'info')+'">'+
+        '<div style="font-family:var(--font-mono);line-height:1.8">'+
+          'nodeId&nbsp; '+esc(local)+(onchain ? '<br>контракт&nbsp; '+esc(onchain) : '')+
+        '</div>'+
+        (onchain ? (agree ? 'Контракт и локальный расчёт совпадают.' : 'Расхождение: контракт считает nodeId иначе.')
+                 : 'Контракт недоступен — показан только локальный расчёт.')+
+        ' Адрес k1 из одного ключа r1 получить нельзя — для него нужна строка регистрации.'+
+      '</div>';
+    return;
+  }
+  let reg, i;
+  try{ reg = parseReg($('nidPub').value); i = await inspectReg(reg); }
   catch(e){ return say('nidMsg', e.message, 'err'); }
-  const local = '0x' + ethers.sha256(pub).slice(2).slice(-20);
-  const eth = ethers.getAddress('0x' + ethers.keccak256(pub).slice(2).slice(-40));
-  let onchain = null;
-  try{ if(S.bridge) onchain = await S.bridge.nodeIdFromPubkey(pub); }catch(e){}
-  const agree = onchain && onchain.toLowerCase() === local.toLowerCase();
-  $('nidMsg').innerHTML =
-    '<div class="msg msg-'+(onchain ? (agree?'ok':'err') : 'info')+'">'+
-      '<div style="font-family:var(--font-mono);line-height:1.8">'+
-        'nodeId&nbsp; '+esc(local)+'<br>'+
-        'eth-адрес&nbsp; '+esc(eth)+
-        (onchain ? '<br>контракт&nbsp; '+esc(onchain) : '')+
-      '</div>'+
-      (onchain ? (agree ? 'Контракт и локальный расчёт совпадают.'
-                        : 'Расхождение: контракт считает nodeId иначе.')
-               : 'Контракт недоступен — показан только локальный расчёт.')+
-    '</div>';
+  const v = regVerdict(i);
+  $('nidMsg').innerHTML = '<div class="msg msg-'+(v ? 'err' : i.r1ok === true ? 'ok' : 'info')+'">'+regHtml(i)+
+    esc(v || (i.r1ok === true ? 'Строка в порядке: контракт её примет, если узел ещё не зарегистрирован.'
+                              : 'Подпись r1 проверить не удалось — подключите кошелёк или сеть.'))+'</div>';
 });
 
 document.addEventListener('click', e => {
@@ -1015,9 +1089,16 @@ document.addEventListener('click', e => {
     const tok = av.dataset.addval;
     const box = document.querySelector('[data-msg="'+tok+'"]');
     let pub;
-    try{ pub = parsePub(document.querySelector('[data-pub="'+tok+'"]').value); }
+    try{ pub = parseReg(document.querySelector('[data-pub="'+tok+'"]').value); }
     catch(err){ return say(box, err.message, 'err'); }
-    send(box, 'Добавление узла', () => S.bridge.addTokenValidator(tok, pub));
+    // Первое нажатие — проверка строки и показ; второе с той же строкой — отправка.
+    if(av.dataset.checked === pub){ av.dataset.checked = ''; send(box, 'Добавление узла', () => S.bridge.addTokenValidator(tok, pub)); return; }
+    inspectReg(pub).then(i => {
+      const v = regVerdict(i);
+      if(v){ box.innerHTML = '<div class="msg msg-err">'+regHtml(i)+esc(v)+'</div>'; return; }
+      av.dataset.checked = pub;
+      box.innerHTML = '<div class="msg msg-info">'+regHtml(i)+'Сверьте с тем, что показывает узел, и нажмите «Добавить узел» ещё раз.</div>';
+    }).catch(err => say(box, err.message, 'err'));
     return;
   }
   const cap = e.target.closest('[data-setcap]');
